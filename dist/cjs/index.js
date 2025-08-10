@@ -1,0 +1,374 @@
+"use strict";
+/* eslint @typescript-eslint/no-explicit-any: "off" */
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.UNDEFINED_YJS_PLACEHOLDER = void 0;
+exports.bind = bind;
+const vanilla_1 = require("valtio/vanilla");
+const Y = __importStar(require("yjs"));
+const parseProxyOps_js_1 = require("./parseProxyOps.js");
+const NON_SERIALIZABLE_ERROR = new Error('Proxy type must be serializable');
+function deepEqual(a, b) {
+    // Adapted from
+    // https://github.com/epoberezkin/fast-deep-equal/blob/a8e7172/src/index.jst
+    if (a === b)
+        return true;
+    if (a && b && typeof a == 'object' && typeof b == 'object') {
+        if (a.constructor !== b.constructor)
+            return false;
+        if (Array.isArray(a)) {
+            length = a.length;
+            if (length != b.length)
+                return false;
+            for (let i = length; i-- !== 0;)
+                if (!deepEqual(a[i], b[i]))
+                    return false;
+            return true;
+        }
+        if (a.constructor === RegExp)
+            return a.source === b.source && a.flags === b.flags;
+        if (a.valueOf !== Object.prototype.valueOf)
+            return a.valueOf() === b.valueOf();
+        if (a.toString !== Object.prototype.toString)
+            return a.toString() === b.toString();
+        const keys = Object.keys(a);
+        length = keys.length;
+        if (length !== Object.keys(b).length)
+            return false;
+        for (let i = length; i-- !== 0;)
+            if (!Object.prototype.hasOwnProperty.call(b, keys[i]))
+                return false;
+        for (let i = length; i-- !== 0;) {
+            const key = keys[i];
+            if (!deepEqual(a[key], b[key]))
+                return false;
+        }
+        return true;
+    }
+    // This case was added to support comparing YJS null values
+    // against JavaScript null/undefined, as YJS doesn't support
+    // undefined values.
+    if ((a === undefined || a === null) && b === null) {
+        return true;
+    }
+    // case for undefined placeholder for yjs
+    if ((a === undefined && b === exports.UNDEFINED_YJS_PLACEHOLDER) ||
+        (b === undefined && a === exports.UNDEFINED_YJS_PLACEHOLDER)) {
+        return true;
+    }
+    // true if both NaN, false otherwise
+    return a !== a && b !== b;
+}
+const isProxyObject = (x) => typeof x === 'object' && x !== null && (0, vanilla_1.getVersion)(x) !== undefined;
+const isProxyArray = (x) => Array.isArray(x) && (0, vanilla_1.getVersion)(x) !== undefined;
+const isPrimitiveMapValue = (v) => v === null ||
+    typeof v === 'string' ||
+    typeof v === 'number' ||
+    typeof v === 'boolean';
+const transact = (doc, opts, fn) => {
+    if (doc) {
+        doc.transact(fn, opts.transactionOrigin);
+    }
+    else {
+        fn();
+    }
+};
+exports.UNDEFINED_YJS_PLACEHOLDER = '__valtio-yjs-undefined__';
+const toYValue = (val) => {
+    if (val === undefined) {
+        return exports.UNDEFINED_YJS_PLACEHOLDER;
+    }
+    if (isProxyArray(val)) {
+        const arr = new Y.Array();
+        arr.insert(0, val.map(toYValue).filter((v) => v !== undefined && v !== null));
+        return arr;
+    }
+    if (isProxyObject(val)) {
+        const map = new Y.Map();
+        Object.entries(val).forEach(([key, value]) => {
+            const v = toYValue(value);
+            if (v !== undefined) {
+                map.set(key, v);
+            }
+        });
+        return map;
+    }
+    if (isPrimitiveMapValue(val)) {
+        return val;
+    }
+    throw NON_SERIALIZABLE_ERROR;
+};
+const toJSON = (yv) => {
+    if (yv === exports.UNDEFINED_YJS_PLACEHOLDER) {
+        return undefined;
+    }
+    if (yv instanceof Y.Array) {
+        return yv.map((v) => toJSON(v));
+    }
+    if (yv instanceof Y.Map) {
+        const obj = {};
+        for (const entry of yv.entries()) {
+            obj[entry[0]] = toJSON(entry[1]);
+        }
+        return obj;
+    }
+    return yv;
+};
+const getNestedValues = (p, y, path) => {
+    let pv = p;
+    let yv = y;
+    for (let i = 0; i < path.length; i += 1) {
+        const k = path[i];
+        if (yv instanceof Y.Map) {
+            // child may already be deleted
+            if (!pv)
+                break;
+            pv = pv[k];
+            yv = yv.get(k);
+        }
+        else if (yv instanceof Y.Array) {
+            // child may already be deleted
+            if (!pv)
+                break;
+            const index = Number(k);
+            pv = pv[k];
+            yv = yv.get(index);
+        }
+        else {
+            pv = null;
+            yv = null;
+        }
+    }
+    return { p: pv, y: yv };
+};
+function bind(p, y, opts = {}) {
+    if (isProxyArray(p) && !(y instanceof Y.Array)) {
+        if (process.env.NODE_ENV !== 'production') {
+            console.warn('proxy not same type');
+        }
+    }
+    if (isProxyObject(p) && !isProxyArray(p) && !(y instanceof Y.Map)) {
+        if (process.env.NODE_ENV !== 'production') {
+            console.warn('proxy not same type');
+        }
+    }
+    // initialize from y
+    initializeFromY(p, y);
+    // initialize from p
+    initializeFromP(p, y, opts);
+    if (isProxyArray(p) && y instanceof Y.Array) {
+        p.splice(y.length);
+    }
+    // subscribe p
+    const unsubscribeP = subscribeP(p, y, opts);
+    // subscribe y
+    const unsubscribeY = subscribeY(y, p);
+    return () => {
+        unsubscribeP();
+        unsubscribeY();
+    };
+}
+function initializeFromP(p, y, opts) {
+    transact(y.doc, opts, () => {
+        if (isProxyObject(p) && y instanceof Y.Map) {
+            Object.entries(p).forEach(([k, pv]) => {
+                const yv = y.get(k);
+                if (!deepEqual(pv, toJSON(yv))) {
+                    insertPValueToY(pv, y, k);
+                }
+            });
+        }
+        if (isProxyArray(p) && y instanceof Y.Array) {
+            p.forEach((pv, i) => {
+                const yv = y.get(i);
+                if (!deepEqual(pv, toJSON(yv))) {
+                    insertPValueToY(pv, y, i);
+                }
+            });
+        }
+    });
+}
+function initializeFromY(p, y) {
+    if (isProxyObject(p) && y instanceof Y.Map) {
+        y.forEach((yv, k) => {
+            if (!deepEqual(p[k], toJSON(yv))) {
+                p[k] = toJSON(yv);
+            }
+        });
+    }
+    if (isProxyArray(p) && y instanceof Y.Array) {
+        y.forEach((yv, i) => {
+            if (!deepEqual(p[i], toJSON(yv))) {
+                insertYValueToP(yv, p, i);
+            }
+        });
+    }
+}
+function insertPValueToY(pv, y, k) {
+    let yv;
+    try {
+        yv = toYValue(pv);
+    }
+    catch (error) {
+        if (error === NON_SERIALIZABLE_ERROR) {
+            if (process.env.NODE_ENV !== 'production') {
+                console.warn('unsupported p type', pv);
+            }
+            return;
+        }
+        throw error;
+    }
+    if (y instanceof Y.Map && typeof k === 'string') {
+        y.set(k, yv);
+    }
+    else if (y instanceof Y.Array && typeof k === 'number') {
+        y.insert(k, [yv]);
+    }
+}
+function insertYValueToP(yv, p, k) {
+    if (isProxyObject(p) && typeof k === 'string') {
+        p[k] = toJSON(yv);
+    }
+    else if (isProxyArray(p) && typeof k === 'number') {
+        p.splice(k, 0, toJSON(yv));
+    }
+}
+function subscribeP(p, y, opts) {
+    return (0, vanilla_1.subscribe)(p, (ops) => {
+        transact(y.doc, opts, () => {
+            ops.forEach((op) => {
+                const path = op[1].slice(0, -1);
+                const k = op[1][op[1].length - 1];
+                const parent = getNestedValues(p, y, path);
+                if (parent.y instanceof Y.Map) {
+                    if (op[0] === 'delete') {
+                        parent.y.delete(k);
+                    }
+                    else if (op[0] === 'set') {
+                        const pv = parent.p[k];
+                        const yv = parent.y.get(k);
+                        if (!deepEqual(pv, toJSON(yv))) {
+                            insertPValueToY(pv, parent.y, k);
+                        }
+                    }
+                }
+                else if (parent.y instanceof Y.Array) {
+                    if (deepEqual(parent.p, toJSON(parent.y))) {
+                        return;
+                    }
+                    const arrayOps = (0, parseProxyOps_js_1.parseProxyOps)(ops);
+                    arrayOps.forEach((aOp) => {
+                        const i = aOp[1];
+                        if (aOp[0] === 'delete') {
+                            if (parent.y.length > i) {
+                                parent.y.delete(i, 1);
+                            }
+                            return;
+                        }
+                        let pv = parent.p[i];
+                        if (pv === undefined) {
+                            if (aOp[0] === 'set' && i < parent.y.length) {
+                                return;
+                            }
+                            else {
+                                pv = undefined;
+                            }
+                        }
+                        if (aOp[0] === 'set') {
+                            if (parent.y.length > i) {
+                                parent.y.delete(i, 1);
+                            }
+                            insertPValueToY(pv, parent.y, i);
+                        }
+                        else if (aOp[0] === 'insert') {
+                            insertPValueToY(pv, parent.y, i);
+                        }
+                    });
+                }
+            });
+        });
+    });
+}
+function subscribeY(y, p) {
+    const observer = (events) => {
+        events.forEach((event) => {
+            const path = event.path;
+            const parent = getNestedValues(p, y, path);
+            if (parent.y instanceof Y.Map) {
+                event.changes.keys.forEach((item, k) => {
+                    if (item.action === 'delete') {
+                        delete parent.p[k];
+                    }
+                    else {
+                        const yv = toJSON(parent.y.get(k));
+                        if (deepEqual(yv, parent.p[k])) {
+                            return;
+                        }
+                        insertYValueToP(yv, parent.p, k);
+                    }
+                });
+            }
+            else if (parent.y instanceof Y.Array) {
+                if (deepEqual(parent.p, toJSON(parent.y))) {
+                    return;
+                }
+                let retain = 0;
+                event.changes.delta.forEach((item) => {
+                    if (item.retain) {
+                        retain += item.retain;
+                    }
+                    if (item.delete) {
+                        parent.p.splice(retain, item.delete);
+                    }
+                    if (item.insert) {
+                        if (Array.isArray(item.insert)) {
+                            item.insert.forEach((yv, i) => {
+                                insertYValueToP(yv, parent.p, retain + i);
+                            });
+                        }
+                        else {
+                            insertYValueToP(item.insert, parent.p, retain);
+                        }
+                        retain += item.insert.length;
+                    }
+                });
+            }
+        });
+    };
+    y.observeDeep(observer);
+    return () => {
+        y.unobserveDeep(observer);
+    };
+}
