@@ -41,6 +41,7 @@ const Y = __importStar(require("yjs"));
 const parseProxyOps_js_1 = require("./parseProxyOps.js");
 const NON_SERIALIZABLE_ERROR = new Error('Proxy type must be serializable');
 function deepEqual(a, b) {
+    let length;
     // Adapted from
     // https://github.com/epoberezkin/fast-deep-equal/blob/a8e7172/src/index.jst
     if (a === b)
